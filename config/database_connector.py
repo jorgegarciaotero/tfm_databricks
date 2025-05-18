@@ -104,7 +104,7 @@ class DatabaseConnector:
                     """
                 else:
                     query = f"(SELECT * FROM {table_name}) AS subquery"
-
+                print(f"query: \n{query}")
                 df = spark.read.jdbc(
                     url=self.jdbc_url,
                     table=query,

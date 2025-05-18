@@ -268,9 +268,9 @@ def add_lagged_returns(df):
         - ret_past_7d
         - ret_past_1m
         - ret_past_3m
+        - ret_past_6m
         - ret_past_1y
         - ret_past_5y
-        - ret_total
     """
     from pyspark.sql.window import Window
     from pyspark.sql.functions import lag, first, when, col, lit
@@ -280,6 +280,7 @@ def add_lagged_returns(df):
         "7d": 7,
         "1m": 21,
         "3m": 63,
+        "6m": 126,
         "1y": 252,
         "5y": 1260
     }
@@ -360,14 +361,14 @@ def remove_initial_days_per_symbol(df, min_days=20):
 
 # COMMAND ----------
 
-def main(storage_account, container, database_name, date_value, period,logger):
+def main(storage_account, container, database_name, date_value, period,time_window,logger):
 
     if period=='complete':
         start_date=None
         end_date=None
     else:
         date_obj = datetime.strptime(date_value, "%Y-%m-%d")
-        window_days = 30
+        window_days = int(time_window)
         start_date = (date_obj - timedelta(days=window_days)).strftime("%Y-%m-%d")
         end_date = date_value
     print(f"start_date: {start_date}")
@@ -377,14 +378,6 @@ def main(storage_account, container, database_name, date_value, period,logger):
     df_stock_data = db_connector.read_table_from_sql("stock_data", start_date=start_date, end_date=end_date)
     print(f"stock_data count: {df_stock_data.count()}")
 
-    '''df_company_info = db_connector.read_table_from_sql("company_info")
-    df_cashflow = db_connector.read_table_from_sql("cashflow_data")
-    df_dividend = db_connector.read_table_from_sql("dividend_data")
-    df_financial = db_connector.read_table_from_sql("financial_data")
-    df_recommendations = db_connector.read_table_from_sql("recommendations_data")
-    df_split = db_connector.read_table_from_sql("split_data")'''
-    # recommendations_data,split_data
-
     #Addition of features
     df_stock_data = add_basic_stock_metrics(df_stock_data)
     df_stock_data = add_technical_stock_metrics(df_stock_data)
@@ -393,9 +386,7 @@ def main(storage_account, container, database_name, date_value, period,logger):
     df_stock_data = add_candlestick_features(df_stock_data)
     df_stock_data = add_momentum_metrics(df_stock_data)
     df_stock_data= compute_var(df_stock_data, confidence_level=0.95, window=100)
-    df_stock_data = add_forward_returns_from_start(df_stock_data)
     df_stock_data = add_lagged_returns(df_stock_data)
-
     
     df_stock_data.printSchema()
     print(f"count: {df_stock_data.count()}")
@@ -408,8 +399,37 @@ def main(storage_account, container, database_name, date_value, period,logger):
         print("daily")
         df_stock_data_today = df_stock_data.filter(col("date") == lit(date_value))
         db_connector.save_table( df_stock_data_today,container,database_name, storage_account,'stock_data',date_value)
+    
+
+    
+    #Other data
+    if (
+    start_date is None or
+    datetime.strptime(start_date, "%Y-%m-%d").day == 1
+    ):
+        df_company_info = db_connector.read_table_from_sql("company_info")
+        df_cashflow = db_connector.read_table_from_sql("cashflow_data")
+        df_dividend = db_connector.read_table_from_sql("dividend_data")
+        df_financial = db_connector.read_table_from_sql("financial_data")
+        df_recommendations = db_connector.read_table_from_sql("recommendations_data")
+        df_split = db_connector.read_table_from_sql("split_data")
+
+        df_company_info.coalesce(1).write.mode("overwrite").format("parquet").save("abfss://smart-wallet-dl@smartwalletjorge.dfs.core.windows.net/smart_wallet/company_info")
+        df_cashflow.coalesce(1).write.mode("overwrite").format("parquet").save("abfss://smart-wallet-dl@smartwalletjorge.dfs.core.windows.net/smart_wallet/cashflow_data")
+        df_dividend.coalesce(1).write.mode("overwrite").format("parquet").save("abfss://smart-wallet-dl@smartwalletjorge.dfs.core.windows.net/smart_wallet/dividend_data")
+        df_financial.coalesce(1).write.mode("overwrite").format("parquet").save("abfss://smart-wallet-dl@smartwalletjorge.dfs.core.windows.net/smart_wallet/financial_data")
+        df_recommendations.coalesce(1).write.mode("overwrite").format("parquet").save("abfss://smart-wallet-dl@smartwalletjorge.dfs.core.windows.net/smart_wallet/recommendations_data")
+        df_split.coalesce(1).write.mode("overwrite").format("parquet").save("abfss://smart-wallet-dl@smartwalletjorge.dfs.core.windows.net/smart_wallet/split_data")
+
     logger.info(f"Data saved to {container}/{database_name}/stock_data/{date_value}")
     display(df_stock_data)
+
+    #Convert delta to parquet for Azure ML integration
+    df = spark.read.format("delta").load("abfss://smart-wallet-dl@smartwalletjorge.dfs.core.windows.net/smart_wallet/stock_data")
+    df=remove_initial_days_per_symbol(df, min_days=20)
+    df.coalesce(1).write.mode("overwrite").format("parquet").save("abfss://smart-wallet-dl@smartwalletjorge.dfs.core.windows.net/smart_wallet/stock_data_parquet")
+
+
 
 # COMMAND ----------
 
@@ -424,17 +444,18 @@ if __name__ == '__main__':
     dbutils.widgets.text("storage_account", "smartwalletjorge", "Storage Account")
     dbutils.widgets.text("container", "smart-wallet-dl", "Container")
     dbutils.widgets.text("database", "smart_wallet", "Database")
-    dbutils.widgets.text("date", "", "Date")
     dbutils.widgets.text("period", "complete", "Period")
-
+    dbutils.widgets.text("date", "", "Date")
+    dbutils.widgets.text("time_window", "1", "time_window")
 
     storage_account = dbutils.widgets.get("storage_account")
     container = dbutils.widgets.get("container")
     database_name = dbutils.widgets.get("database")
     date_value = dbutils.widgets.get("date")
     period = dbutils.widgets.get("period")
-    
-    main(storage_account, container, database_name, date_value, period,logger)
+    time_window = dbutils.widgets.get("time_window")
+
+    main(storage_account, container, database_name, date_value, period,time_window,logger)
     
 
    
@@ -449,7 +470,3 @@ if __name__ == '__main__':
 df = spark.read.format("delta").load("abfss://smart-wallet-dl@smartwalletjorge.dfs.core.windows.net/smart_wallet/stock_data")
 df=remove_initial_days_per_symbol(df, min_days=20)
 df.coalesce(1).write.mode("overwrite").format("parquet").save("abfss://smart-wallet-dl@smartwalletjorge.dfs.core.windows.net/smart_wallet/stock_data_parquet")
-
-# COMMAND ----------
-
-
