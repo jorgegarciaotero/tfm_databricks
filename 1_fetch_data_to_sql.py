@@ -30,15 +30,31 @@ import lxml
 
 # COMMAND ----------
 
+dbutils.widgets.removeAll()
+
+dbutils.widgets.text("first_date", "2025-04-17", "First Date")
+dbutils.widgets.text("last_date",  "2025-04-18", "Last Date")
+dbutils.widgets.text("check_tickers",  "True", "Check New Tickers")
+dbutils.widgets.text("batch",  ":1000", "Batch")
+dbutils.widgets.text("get_company_info",  "False", "Check for company info")
+
+first_date = dbutils.widgets.get("first_date")
+last_date = dbutils.widgets.get("last_date")
+check_tickers = dbutils.widgets.get("check_tickers")
+batch = dbutils.widgets.get("batch")
+get_company_info = dbutils.widgets.get("get_company_info")
+
+# COMMAND ----------
+
 def get_tickers_from_csv(url,skiprows,sep=','):
     '''
     Extract tickers from a remote CSV file.
-    Args:
-        url (str): URL of the CSV file to download.
-        skiprows (int): Number of rows to skip from the top of the file.
-        sep (str): Delimiter used in the CSV file (default is ',').
-    Returns:
-        pd.DataFrame: DataFrame containing the extracted tickers.
+    ARGS:
+        - url (str): URL of the CSV file to download.
+        - skiprows (int): Number of rows to skip from the top of the file.
+        - sep (str): Delimiter used in the CSV file (default is ',').
+    RETURNS:
+        - df (pd.DataFrame): DataFrame containing the extracted tickers.
     '''
     headers = {
         'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/110.0.0.0 Safari/537.36',
@@ -54,12 +70,12 @@ def get_tickers_from_csv(url,skiprows,sep=','):
 def process_tickers(db,table_name,logger):
     '''
     Given a list of tickers, fetch their data from Yahoo Finance and upsert it into the database.
-    Args:
-        db (Database): Database connection object.
-        table_name (str): Name of the table to upsert data into.
-        tickers (list): List of ticker symbols to process.
-        logger (Logger): Logger instance for tracking progress and errors.
-    Returns:
+    ARGS:
+        - db (Database): Database connection object.
+        - table_name (str): Name of the table to upsert data into.
+        - tickers (list): List of ticker symbols to process.
+        - logger (Logger): Logger instance for tracking progress and errors.
+    RETURNS:
         None
     '''
     #URLS
@@ -93,61 +109,104 @@ def process_tickers(db,table_name,logger):
     print(df_all.head())
     return
     
-def process_price_history(company, ticker, db, first_date, last_date,logger):
+def process_price_history(tickers, db, first_date, last_date, logger, batch_size=100, delay=2):
     '''
-    Download and process historical stock price data for a given ticker.
+    Download and process historical stock price data for a batch of tickers.
 
-    Args:
-        company (yf.Ticker): Yahoo Finance ticker object.
-        ticker (str): Ticker symbol.
-        db (Database): Database connection object.
-        logger (Logger): Logger instance for tracking progress and errors.
+    ARGS:
+        - tickers (list of str): List of Yahoo Finance ticker symbols.
+        - db (Database): Database connection object.
+        - first_date (str): Start date for the historical data (format: 'YYYY-MM-DD').
+        - last_date (str): End date for the historical data (format: 'YYYY-MM-DD').
+        - logger (Logger): Logger instance for tracking progress and errors.
+        - batch_size (int, optional): Number of tickers to process per batch. Default is 100.
+        - delay (int, optional): Delay in seconds between batches to avoid rate limits. Default is 2.
 
-    Returns:
-        None
+    RETURNS:
+        - None
     '''
-    df_hist = company.history(start=first_date, end=last_date)
-    print(f"shape: {df_hist.shape}")
-    print(df_hist.head())
-    if not df_hist.empty:
-        df_hist.reset_index(inplace=True)
-        df_hist['symbol'] = ticker
-        df_hist = df_hist.rename(columns=lambda x: str(x).strip().lower().replace(' ', '_'))
-        df_hist = df_hist.rename(columns={'open': 'open_v', 'close': 'close_v'})
-        upsert_data(db=db, table_name="stock_data", df=df_hist, pk_columns=["date", "symbol"], logger=logger)
+    for i in range(0, len(tickers), batch_size):
 
-def process_company_info(company, db, logger):
+        batch = tickers[i:i+batch_size]
+        logger.info(f"Processing batch {i // batch_size + 1}: {batch}")
+        df = yf.download(" ".join(batch), start=first_date, end=last_date, group_by="ticker", threads=True)
+
+        if isinstance(df.columns, pd.MultiIndex):
+            print(f"Columns for symbol:")
+            for symbol in df.columns.levels[0]:
+                if symbol in df.columns:
+                    print(f"{symbol}: {list(df[symbol].columns)}")
+        else:
+            print("\n The dataframe doesnt have multindex. Columns:", list(df.columns))
+
+        for symbol in batch:
+            try:
+                df_symbol = df[symbol].copy()
+                if df_symbol.empty:
+                    continue
+                if 'Adj Close' in df_symbol.columns:
+                    df_symbol.drop(columns=['Adj Close'], inplace=True)
+                df_symbol.reset_index(inplace=True)
+                df_symbol['symbol'] = symbol
+                df_symbol = df_symbol.rename(columns=lambda x: str(x).strip().lower().replace(' ', '_'))
+                df_symbol = df_symbol.rename(columns={'open': 'open_v', 'close': 'close_v'})
+                
+                upsert_data(db=db, table_name="stock_data", df=df_symbol,
+                            pk_columns=["date", "symbol"], logger=logger)
+            except Exception as e:
+                logger.error(f"Error processing {symbol}: {e}")
+        time.sleep(delay)
+    return
+
+
+
+def process_company_info(company, ticker, db, logger):
     '''
     Retrieve and process general company information and financial ratios.
 
-    Args:
-        company (yf.Ticker): Yahoo Finance ticker object.
-        ticker (str): Ticker symbol.
-        db (Database): Database connection object.
-        logger (Logger): Logger instance for tracking progress and errors.
+    ARGS:
+        - company (yf.Ticker): Yahoo Finance ticker object.
+        - ticker (str): Ticker symbol.
+        - db (Database): Database connection object.
+        - logger (Logger): Logger instance for tracking progress and errors.
 
-    Returns:
-        None
+    RETURNS:
+        - None
     '''
     df_info = pd.json_normalize(company.info)
+
     if not df_info.empty:
-        df_info = df_info.rename(columns={'52WeekChange': 'Week52Change', 'open': 'open_v'})
+        df_info = df_info.rename(columns={
+            '52WeekChange': 'Week52Change',
+            'open': 'open_v'
+        })
         df_info = df_info.rename(columns=lambda x: str(x).strip().lower().replace(' ', '_'))
         df_info['date'] = pd.Timestamp.today().normalize()
+        df_info['symbol'] = ticker  # 🔹 agregar columna clave para la BD
+
         if 'companyofficers' in df_info.columns:
-            df_info = df_info.drop(columns=['companyofficers'])
-        upsert_data(db=db, table_name="company_info", df=df_info, pk_columns=["date", "symbol"], logger=logger)
+            df_info.drop(columns=['companyofficers'], inplace=True)
+
+        upsert_data(
+            db=db,
+            table_name="company_info",
+            df=df_info,
+            pk_columns=["date", "symbol"],
+            logger=logger
+        )
+
+
 
 def process_dividends(company, ticker, db, logger):
     """
     Extract historical dividend payments for the specified ticker.
-    Args:
-        company (yf.Ticker): Yahoo Finance ticker object.
-        ticker (str): Ticker symbol.
-        db (Database): Database connection object.
-        logger (Logger): Logger instance for tracking progress and errors.
-    Returns:
-        None
+    ARGS:
+       - company (yf.Ticker): Yahoo Finance ticker object.
+       - ticker (str): Ticker symbol.
+       - db (Database): Database connection object.
+       - logger (Logger): Logger instance for tracking progress and errors.
+    RETURNS:
+        - None
     """
     df_div = company.dividends
     if not df_div.empty:
@@ -159,12 +218,12 @@ def process_dividends(company, ticker, db, logger):
 def process_splits(company, ticker, db, logger):
     """
     Extract stock split history for the specified ticker.
-    Args:
-        company (yf.Ticker): Yahoo Finance ticker object.
-        ticker (str): Ticker symbol.
-        db (Database): Database connection object.
-        logger (Logger): Logger instance for tracking progress and errors.
-    Returns:
+    ARGS:
+        - company (yf.Ticker): Yahoo Finance ticker object.
+        - ticker (str): Ticker symbol.
+        -  db (Database): Database connection object.
+        - logger (Logger): Logger instance for tracking progress and errors.
+    RETURNS:
         None
     """
     df_split = company.splits
@@ -177,12 +236,12 @@ def process_splits(company, ticker, db, logger):
 def process_cashflow(company, ticker, db, logger):
     """
     Retrieve and process cash flow statement data for the company.
-    Args:
-        company (yf.Ticker): Yahoo Finance ticker object.
-        ticker (str): Ticker symbol.
-        db (Database): Database connection object.
-        logger (Logger): Logger instance for tracking progress and errors.
-    Returns:
+    ARGS:
+        - company (yf.Ticker): Yahoo Finance ticker object.
+        - ticker (str): Ticker symbol.
+        - db (Database): Database connection object.
+        - logger (Logger): Logger instance for tracking progress and errors.
+    RETURNS:
         None
     """
     df_cf = company.cashflow.T
@@ -197,13 +256,13 @@ def process_cashflow(company, ticker, db, logger):
 def process_recommendations(company, ticker, db, logger):
     """
     Extract analyst recommendations for the company and store them.
-    Args:
-        company (yf.Ticker): Yahoo Finance ticker object.
-        ticker (str): Ticker symbol.
-        db (Database): Database connection object.
-        logger (Logger): Logger instance for tracking progress and errors.
-    Returns:
-        None
+    ARGS:
+        - company (yf.Ticker): Yahoo Finance ticker object.
+        - ticker (str): Ticker symbol.
+        - db (Database): Database connection object.
+        - logger (Logger): Logger instance for tracking progress and errors.
+    RETURNS:
+        - None
     """
     df_reco = company.recommendations
     if not df_reco.empty:
@@ -215,12 +274,12 @@ def process_recommendations(company, ticker, db, logger):
 def process_balance_sheet(company, ticker, db, logger):
     """
     Retrieve and process balance sheet data for the company.
-    Args:
-        company (yf.Ticker): Yahoo Finance ticker object.
-        ticker (str): Ticker symbol.
-        db (Database): Database connection object.
-        logger (Logger): Logger instance for tracking progress and errors.
-    Returns:
+    ARGS:
+        - company (yf.Ticker): Yahoo Finance ticker object.
+        - ticker (str): Ticker symbol.
+        - db (Database): Database connection object.
+        - logger (Logger): Logger instance for tracking progress and errors.
+    RETURNS:
         None
     """
     df_bs = company.balance_sheet.T
@@ -236,14 +295,14 @@ def process_balance_sheet(company, ticker, db, logger):
 def process_financials(company, ticker, db, logger):
     """
     Retrieve and process the company's income statement data.
-    Args:
-        company (yf.Ticker): Yahoo Finance ticker object.
-        ticker (str): Ticker symbol.
-        db (Database): Database connection object.
-        logger (Logger): Logger instance for tracking progress and errors.
-    Returns:
-        None
-        logger (_type_): _description_
+    ARGS:
+       - company (yf.Ticker): Yahoo Finance ticker object.
+       - ticker (str): Ticker symbol.
+       - db (Database): Database connection object.
+       - logger (Logger): Logger instance for tracking progress and errors.
+    RETURNS:
+       - None
+       - logger (_type_): _description_
     """
     df_fin = company.financials.T
     if not df_fin.empty:
@@ -257,14 +316,15 @@ def process_financials(company, ticker, db, logger):
 
 # COMMAND ----------
 
-def main(first_date,last_date,batch):   
-    logger = get_logger(name="my_app", level="INFO", log_file="my_app.log")
+def main(first_date,last_date,batch,get_company_info): 
+    log_file=batch.replace(":","")
+    logger = get_logger(name="my_app", level="INFO", log_file=f"{log_file}.log")
     logger.info("Starting ...")   
     
     start_time = datetime.now()
     db =  DatabaseConnector()
     df = db.read_table_from_sql("company_info")
-
+    
     if check_tickers=='True':
         process_tickers(db,'tickers',logger)
 
@@ -278,38 +338,28 @@ def main(first_date,last_date,batch):
     end = int(end) if end else None
     total_tickers = total_tickers[slice(start, end)]
     print(f"Total tickers slice: {len(total_tickers)}")
-
-    for i, ticker in enumerate(total_tickers, start=1):
-        try:
-            logger.info(f"{i}/{len(total_tickers)} Processing: {ticker}")
-            company = yf.Ticker(ticker)
-            process_price_history(company, ticker, db,first_date, last_date, logger)
-            process_dividends(company, ticker, db, logger)
-            process_splits(company, ticker, db, logger)
-            process_recommendations(company, ticker, db, logger)
-            process_balance_sheet(company, ticker, db, logger)
-            process_financials(company, ticker, db, logger)
-            process_company_info(company, db, logger)
-            process_cashflow(company, ticker, db, logger)
-        except Exception as e:
-            logger.error(f"❌ Error en {ticker}: {e}")
-            continue
+    
+    process_price_history(tickers=total_tickers,db=db,first_date=first_date,last_date=last_date,logger=logger,batch_size=100,delay=2)
+    
+    if get_company_info=='True':
+        for i, ticker in enumerate(total_tickers, start=1):
+            try:
+                logger.info(f"{i}/{len(total_tickers)} Processing: {ticker}")
+                company = yf.Ticker(ticker)
+                process_dividends(company, ticker, db, logger)
+                process_splits(company, ticker, db, logger)
+                process_recommendations(company, ticker, db, logger)
+                process_balance_sheet(company, ticker, db, logger)
+                process_financials(company, ticker, db, logger)
+                process_company_info(company, db, logger)
+                process_cashflow(company, ticker, db, logger)
+            except Exception as e:
+                logger.error(f"Error in {ticker}: {e}")
+                continue
     end_time = datetime.now()            
     elapsed_time = end_time - start_time
     logger.info(f"⏳ Total execution time: {elapsed_time}")
 
 # COMMAND ----------
 
-dbutils.widgets.removeAll()
-
-dbutils.widgets.text("first_date", "2025-04-17", "First Date")
-dbutils.widgets.text("last_date",  "2025-04-18", "Last Date")
-dbutils.widgets.text("check_tickers",  "True", "Check New Tickers")
-dbutils.widgets.text("batch",  ":1000", "Batch")
-
-first_date = dbutils.widgets.get("first_date")
-last_date = dbutils.widgets.get("last_date")
-check_tickers = dbutils.widgets.get("check_tickers")
-batch = dbutils.widgets.get("batch")
-
-main(first_date,last_date,batch)
+main(first_date,last_date,batch,get_company_info)
