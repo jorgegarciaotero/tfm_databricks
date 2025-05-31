@@ -8,7 +8,7 @@
 # COMMAND ----------
 
 from pyspark.sql.window import Window
-from pyspark.sql.functions import col, lag, avg, stddev, when, log, avg,abs, lit, last, isnan
+from pyspark.sql.functions import col, lag, avg, stddev, when, log, avg,abs, lit, last, isnan,lead
 from pyspark.sql.functions import greatest, least,  row_number, max as spark_max, expr
 from datetime import datetime, timedelta
 import sys
@@ -254,62 +254,73 @@ def add_momentum_metrics(df):
 
 # COMMAND ----------
 
-def add_lagged_returns(df):
+def add_future_returns(df):
     """
-    Adds past return features for fixed time horizons:
-    1d, 7d, 1m, 3m, 1y, 5y and total since first available date.
-    
-    Args:
-        df (DataFrame): Spark DataFrame with at least ['symbol', 'date', 'close_v']
+    Add future return columns for 3-month, 6-month, and 1-year horizons.
+
+    For each symbol and date, computes:
+      - price_lead_3m: closing price ~63 rows ahead (≈3 months of trading days)
+      - price_lead_6m: closing price ~126 rows ahead (≈6 months of trading days)
+      - price_lead_1y: closing price ~252 rows ahead (≈1 year of trading days)
+
+      - ret_next_3m: (price_lead_3m / close_v) - 1
+      - ret_next_6m: (price_lead_6m / close_v) - 1
+      - ret_next_1y: (price_lead_1y / close_v) - 1
+
+    Assumes:
+      - The DataFrame `df` contains at least ['symbol', 'date', 'close_v'].
+      - `df` is already ordered by ('symbol','date').
 
     Returns:
-        DataFrame: Enriched DataFrame with new columns:
-        - ret_past_1d
-        - ret_past_7d
-        - ret_past_1m
-        - ret_past_3m
-        - ret_past_6m
-        - ret_past_1y
-        - ret_past_5y
+      DataFrame: same DataFrame with new columns:
+        price_lead_3m, price_lead_6m, price_lead_1y,
+        ret_next_3m, ret_next_6m, ret_next_1y.
     """
-    from pyspark.sql.window import Window
-    from pyspark.sql.functions import lag, first, when, col, lit
+    # Number of trading-day rows ahead for each horizon
+    days_3m = 21 * 3    # ~63 trading days
+    days_6m = 21 * 6    # ~126 trading days
+    days_1y = 21 * 12   # ~252 trading days
 
-    horizons = {
-        "1d": 1,
-        "7d": 7,
-        "1m": 21,
-        "3m": 63,
-        "6m": 126,
-        "1y": 252,
-        "5y": 1260
-    }
+    # Define window partitioned by symbol, ordered by date
+    w = Window.partitionBy("symbol").orderBy("date")
 
-    window = Window.partitionBy("symbol").orderBy("date")
+    # 1) Closing price ~3 months ahead
+    df = df.withColumn("price_lead_3m", lead("close_v", days_3m).over(w))
 
-    # Profitability from t-N to t
-    for label, days in horizons.items():
-        lag_close = lag("close_v", days).over(window)
-        df = df.withColumn(
-            f"ret_past_{label}",
-            when(
-                lag_close.isNotNull() & (lag_close != 0),
-                (col("close_v") - lag_close) / lag_close
-            ).otherwise(lit(None))
-        )
+    # 2) Closing price ~6 months ahead
+    df = df.withColumn("price_lead_6m", lead("close_v", days_6m).over(w))
 
-    # Profitability from first available date to today
-    base_close = first("close_v").over(window.rowsBetween(Window.unboundedPreceding, Window.currentRow))
+    # 3) Closing price ~1 year ahead
+    df = df.withColumn("price_lead_1y", lead("close_v", days_1y).over(w))
+
+    # 4) Future return at 3 months
     df = df.withColumn(
-        "ret_total",
+        "ret_next_3m",
         when(
-            base_close.isNotNull() & (base_close != 0),
-            (col("close_v") - base_close) / base_close
+            col("price_lead_3m").isNotNull() & (col("close_v") > 0),
+            col("price_lead_3m") / col("close_v") - 1
+        ).otherwise(lit(None))
+    )
+
+    # 5) Future return at 6 months
+    df = df.withColumn(
+        "ret_next_6m",
+        when(
+            col("price_lead_6m").isNotNull() & (col("close_v") > 0),
+            col("price_lead_6m") / col("close_v") - 1
+        ).otherwise(lit(None))
+    )
+
+    # 6) Future return at 1 year
+    df = df.withColumn(
+        "ret_next_1y",
+        when(
+            col("price_lead_1y").isNotNull() & (col("close_v") > 0),
+            col("price_lead_1y") / col("close_v") - 1
         ).otherwise(lit(None))
     )
 
     return df
-
 
 # COMMAND ----------
 
@@ -386,13 +397,13 @@ def main(storage_account, container, database_name, date_value, period,time_wind
     df_stock_data = add_candlestick_features(df_stock_data)
     df_stock_data = add_momentum_metrics(df_stock_data)
     df_stock_data= compute_var(df_stock_data, confidence_level=0.95, window=100)
-    df_stock_data = add_lagged_returns(df_stock_data)
+    df_stock_data = add_future_returns(df_stock_data)
     
     df_stock_data.printSchema()
     print(f"count: {df_stock_data.count()}")
     
     if period=='complete':
-        print("complete")
+        print("complete, saving data into stock_Data")
         db_connector.save_table( df_stock_data,container,database_name, storage_account,'stock_data')
         
     else:
@@ -425,9 +436,9 @@ def main(storage_account, container, database_name, date_value, period,time_wind
     display(df_stock_data)
 
     #Convert delta to parquet for Azure ML integration
-    df = spark.read.format("delta").load("abfss://smart-wallet-dl@smartwalletjorge.dfs.core.windows.net/smart_wallet/stock_data")
-    df=remove_initial_days_per_symbol(df, min_days=20)
-    df.coalesce(1).write.mode("overwrite").format("parquet").save("abfss://smart-wallet-dl@smartwalletjorge.dfs.core.windows.net/smart_wallet/stock_data_parquet")
+    #df = spark.read.format("delta").load("abfss://smart-wallet-dl@smartwalletjorge.dfs.core.windows.net/smart_wallet/stock_data")
+    #df=remove_initial_days_per_symbol(df, min_days=20)
+    #df.coalesce(1).write.mode("overwrite").format("parquet").save("abfss://smart-wallet-dl@smartwalletjorge.dfs.core.windows.net/smart_wallet/stock_data_parquet")
 
 
 
@@ -435,7 +446,6 @@ def main(storage_account, container, database_name, date_value, period,time_wind
 
 
 if __name__ == '__main__':
-
     dbutils.widgets.removeAll()
     logger = get_logger(name="normalization", level="INFO", log_file="normalization.log")
     logger.info("Starting ...")   
@@ -455,6 +465,7 @@ if __name__ == '__main__':
     period = dbutils.widgets.get("period")
     time_window = dbutils.widgets.get("time_window")
 
+
     main(storage_account, container, database_name, date_value, period,time_window,logger)
     
 
@@ -466,7 +477,7 @@ if __name__ == '__main__':
 
 # COMMAND ----------
 
-#Convert delta to parquet
+'''#Convert delta to parquet
 df = spark.read.format("delta").load("abfss://smart-wallet-dl@smartwalletjorge.dfs.core.windows.net/smart_wallet/stock_data")
 df=remove_initial_days_per_symbol(df, min_days=20)
-df.coalesce(1).write.mode("overwrite").format("parquet").save("abfss://smart-wallet-dl@smartwalletjorge.dfs.core.windows.net/smart_wallet/stock_data_parquet")
+df.coalesce(1).write.mode("overwrite").format("parquet").save("abfss://smart-wallet-dl@smartwalletjorge.dfs.core.windows.net/smart_wallet/stock_data_parquet")'''
