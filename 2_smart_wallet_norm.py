@@ -436,9 +436,8 @@ def main(storage_account, container, database_name, date_value, period,time_wind
     display(df_stock_data)
 
     #Convert delta to parquet for Azure ML integration
-    #df = spark.read.format("delta").load("abfss://smart-wallet-dl@smartwalletjorge.dfs.core.windows.net/smart_wallet/stock_data")
-    #df=remove_initial_days_per_symbol(df, min_days=20)
-    #df.coalesce(1).write.mode("overwrite").format("parquet").save("abfss://smart-wallet-dl@smartwalletjorge.dfs.core.windows.net/smart_wallet/stock_data_parquet")
+    df = spark.read.format("delta").load("abfss://smart-wallet-dl@smartwalletjorge.dfs.core.windows.net/smart_wallet/stock_data")
+    df.coalesce(1).write.mode("overwrite").format("parquet").save("abfss://smart-wallet-dl@smartwalletjorge.dfs.core.windows.net/smart_wallet/stock_data_parquet")
 
 
 
@@ -465,9 +464,9 @@ if __name__ == '__main__':
     period = dbutils.widgets.get("period")
     time_window = dbutils.widgets.get("time_window")
 
-
     main(storage_account, container, database_name, date_value, period,time_window,logger)
     
+
 
    
 
@@ -477,7 +476,10 @@ if __name__ == '__main__':
 
 # COMMAND ----------
 
-'''#Convert delta to parquet
-df = spark.read.format("delta").load("abfss://smart-wallet-dl@smartwalletjorge.dfs.core.windows.net/smart_wallet/stock_data")
-df=remove_initial_days_per_symbol(df, min_days=20)
-df.coalesce(1).write.mode("overwrite").format("parquet").save("abfss://smart-wallet-dl@smartwalletjorge.dfs.core.windows.net/smart_wallet/stock_data_parquet")'''
+'''client_id = "key1"
+spark.conf.set(
+    "fs.azure.account.key.smartwalletjorge.dfs.core.windows.net",
+    client_id
+)
+df = spark.read.format("delta").load("abfss://smart-wallet-dl@smartwalletjorge.dfs.core.windows.net/smart_wallet/stock_data/")
+df.coalesce(1).write.mode("overwrite").format("parquet").save("abfss://smart-wallet-dl@smartwalletjorge.dfs.core.windows.net/stock_data_parquet")'''
