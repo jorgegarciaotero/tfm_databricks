@@ -6,6 +6,8 @@ import os
 import pyodbc
 import numpy as np
 import time
+import sys
+import pandas as pd
 
 
 class DatabaseConnector:
@@ -286,7 +288,7 @@ def upsert_data(db, table_name, df, pk_columns, logger):
         logger.info(f"✅ Data upserted successfully into {table_name}!")
 
     except Exception as e:
-        
+
         logger.error(f"❌ Error upserting data into: {table_name}: {e}")
         logger.debug(f"Último query que falló: {full_query if 'full_query' in locals() else 'N/A'}")
         sys.exit(0)
