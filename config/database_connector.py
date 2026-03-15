@@ -39,7 +39,7 @@ class DatabaseConnector:
             try:
                 return func()
             except Exception as e:
-                print(f"⚠️ Retry {attempt}/{retries}: {e}")
+                print(f" Retry {attempt}/{retries}: {e}")
                 if retry_message:
                     print(retry_message)
                 if attempt < retries:
@@ -122,7 +122,7 @@ class DatabaseConnector:
             )
 
         except Exception as e:
-            print(f"❌ Error when reading the table {table_name}: {e}")
+            print(f" Error when reading the table {table_name}: {e}")
             return None
 
         
@@ -139,7 +139,7 @@ class DatabaseConnector:
             stmt.close()
             conn.close()
         except Exception as e:
-            print(f"❌ Error executing JDBC query: {e}")
+            print(f" Error executing JDBC query: {e}")
 
 
 
@@ -166,10 +166,10 @@ class DatabaseConnector:
                 writer = writer.mode("overwrite")
 
             writer.save(path)
-            print(f"✅ Saved table {table_name} to {path}.")
+            print(f" Saved table {table_name} to {path}.")
 
         except Exception as e:
-            print(f"❌ Error saving table {table_name}: {e}")
+            print(f" Error saving table {table_name}: {e}")
             
 
     def read_table_from_path(self, container, database_name, table_name, date_value=None, format="parquet"):
@@ -232,7 +232,7 @@ def safe_clean_cell(x):
             return str(x)
         return x
     except Exception as e:
-        print(f"❌ Error with value: {x} ({type(x)}) → {e}")
+        print(f" Error with value: {x} ({type(x)}) → {e}")
         raise
 
 def upsert_data(db, table_name, df, pk_columns, logger):
@@ -285,10 +285,9 @@ def upsert_data(db, table_name, df, pk_columns, logger):
             full_query = query_template.format(*formatted_values)
             db.execute_jdbc_query(full_query)
 
-        logger.info(f"✅ Data upserted successfully into {table_name}!")
+        logger.info(f" Data upserted successfully into {table_name}!")
 
     except Exception as e:
 
-        logger.error(f"❌ Error upserting data into: {table_name}: {e}")
-        logger.debug(f"Último query que falló: {full_query if 'full_query' in locals() else 'N/A'}")
+        logger.error(f" Error upserting data into: {table_name}: {e}")
         sys.exit(0)
