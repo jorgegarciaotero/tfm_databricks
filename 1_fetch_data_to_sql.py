@@ -358,7 +358,7 @@ def main(first_date,last_date,batch,get_company_info):
                 continue
     end_time = datetime.now()            
     elapsed_time = end_time - start_time
-    logger.info(f"⏳ Total execution time: {elapsed_time}")
+    logger.info(f" Total execution time: {elapsed_time}")
 
 # COMMAND ----------
 
