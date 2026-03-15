@@ -701,15 +701,6 @@ def create_tables(db):
     return
 
 
-
-
-
-
-
-
-
-
-
 def main():
     db = Database('pre')
     db.connect()
